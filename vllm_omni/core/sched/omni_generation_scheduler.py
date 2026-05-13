@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from collections import defaultdict
 
@@ -22,6 +23,7 @@ from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
+from vllm_omni.compat import make_filtered_call
 from vllm_omni.core.sched.omni_scheduler_mixin import OmniSchedulerMixin
 from vllm_omni.core.sched.output import OmniCachedRequestData, OmniNewRequestData
 from vllm_omni.distributed.omni_connectors.transfer_adapter.chunk_transfer_adapter import (
@@ -30,6 +32,35 @@ from vllm_omni.distributed.omni_connectors.transfer_adapter.chunk_transfer_adapt
 from vllm_omni.outputs import OmniModelRunnerOutput
 
 logger = init_logger(__name__)
+
+VLLM_OMNI_USE_V2_RUNNER = bool(
+    int(os.environ.get("VLLM_OMNI_USE_V2_MODEL_RUNNER", os.environ.get("VLLM_OMNI_USE_V2_RUNNER", "0")))
+)
+
+_KNOWN_ENGINE_CORE_OUTPUT_COMPAT_FIELDS = {
+    "num_cached_tokens",
+    "num_external_computed_tokens",
+}
+
+
+def _make_engine_core_output(**kwargs):
+    output, unknown = make_filtered_call(
+        EngineCoreOutput,
+        known_extra_fields=_KNOWN_ENGINE_CORE_OUTPUT_COMPAT_FIELDS,
+        **kwargs,
+    )
+    if unknown:
+        logger.warning("Unknown fields passed to EngineCoreOutput: %s", sorted(unknown))
+    return output
+
+
+def _get_request_num_cached_tokens(request) -> int:
+    return max(getattr(request, "num_cached_tokens", 0), 0)
+
+
+def _set_request_num_cached_tokens_if_present(request, value: int) -> None:
+    if hasattr(request, "num_cached_tokens"):
+        request.num_cached_tokens = value
 
 
 class OmniGenerationScheduler(OmniSchedulerMixin, VLLMScheduler):
@@ -499,8 +530,12 @@ class OmniGenerationScheduler(OmniSchedulerMixin, VLLMScheduler):
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if new_token_ids or pooler_output is not None or kv_transfer_params or stopped:
+                num_cached = _get_request_num_cached_tokens(request)
+                if num_cached < 0:
+                    logger.warning("Negative num_cached_tokens (%d) for request %s, clamping to 0", num_cached, req_id)
+                    num_cached = 0
                 outputs[request.client_index].append(
-                    EngineCoreOutput(
+                    _make_engine_core_output(
                         request_id=req_id,
                         new_token_ids=new_token_ids,
                         finish_reason=finish_reason,
@@ -512,6 +547,8 @@ class OmniGenerationScheduler(OmniSchedulerMixin, VLLMScheduler):
                         prefill_stats=request.take_prefill_stats(),
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
+                        num_cached_tokens=num_cached,
+                        num_external_computed_tokens=getattr(request, "num_external_computed_tokens", 0),
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
                     )
@@ -533,13 +570,20 @@ class OmniGenerationScheduler(OmniSchedulerMixin, VLLMScheduler):
             requests = [self.requests[req_id] for req_id in failed_kv_load_req_ids]
             self.finish_requests(failed_kv_load_req_ids, RequestStatus.FINISHED_ERROR)
             for request in requests:
+                num_cached = _get_request_num_cached_tokens(request)
+                if num_cached < 0:
+                    logger.warning(
+                        "Negative num_cached_tokens (%d) for request %s, clamping to 0", num_cached, request.request_id
+                    )
+                    num_cached = 0
                 outputs[request.client_index].append(
-                    EngineCoreOutput(
+                    _make_engine_core_output(
                         request_id=request.request_id,
                         new_token_ids=[],
                         finish_reason=request.get_finished_reason(),
                         events=request.take_events(),
                         trace_headers=request.trace_headers,
+                        num_cached_tokens=num_cached,
                     )
                 )
                 if self.chunk_transfer_adapter is not None:
