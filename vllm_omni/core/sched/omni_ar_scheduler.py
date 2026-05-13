@@ -19,6 +19,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
+from vllm_omni.compat import make_filtered_call
 from vllm_omni.core.sched.omni_scheduler_mixin import OmniSchedulerMixin
 from vllm_omni.core.sched.output import OmniSchedulerOutput
 from vllm_omni.distributed.omni_connectors.transfer_adapter.chunk_transfer_adapter import (
@@ -27,6 +28,32 @@ from vllm_omni.distributed.omni_connectors.transfer_adapter.chunk_transfer_adapt
 from vllm_omni.engine.serialization import deserialize_additional_information
 
 logger = init_logger(__name__)
+
+_KNOWN_ENGINE_CORE_OUTPUT_COMPAT_FIELDS = {
+    "num_cached_tokens",
+    "num_external_computed_tokens",
+    "is_segment_finished",
+    "new_prompt_len_snapshot",
+}
+
+
+def _make_engine_core_output(**kwargs):
+    output, unknown = make_filtered_call(
+        EngineCoreOutput,
+        known_extra_fields=_KNOWN_ENGINE_CORE_OUTPUT_COMPAT_FIELDS,
+        **kwargs,
+    )
+    if unknown:
+        logger.warning("Unknown fields passed to EngineCoreOutput: %s", sorted(unknown))
+    return output
+
+
+def _get_request_num_cached_tokens(request) -> int:
+    return max(getattr(request, "num_cached_tokens", 0), 0)
+
+
+def _get_request_num_external_computed_tokens(request) -> int:
+    return max(getattr(request, "num_external_computed_tokens", 0), 0)
 
 
 @dataclass
@@ -294,7 +321,7 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
                     req = self.requests.get(req_id)
                     if req is not None and not req.is_finished():
                         outputs[req.client_index].append(
-                            EngineCoreOutput(
+                            _make_engine_core_output(
                                 request_id=req_id,
                                 new_token_ids=[],
                                 kv_transfer_params={"kv_ready": True},
@@ -421,7 +448,7 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
             if new_token_ids or pooler_output is not None or kv_transfer_params or stopped:
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
-                    EngineCoreOutput(
+                    _make_engine_core_output(
                         request_id=req_id,
                         new_token_ids=new_token_ids,
                         finish_reason=finish_reason,
@@ -433,6 +460,8 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
                         prefill_stats=request.take_prefill_stats(),
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
+                        num_cached_tokens=_get_request_num_cached_tokens(request),
+                        num_external_computed_tokens=_get_request_num_external_computed_tokens(request),
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
                         is_segment_finished=is_segment_finished,
@@ -459,12 +488,13 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
             self.finish_requests(failed_kv_load_req_ids, RequestStatus.FINISHED_ERROR)
             for request in requests:
                 outputs[request.client_index].append(
-                    EngineCoreOutput(
+                    _make_engine_core_output(
                         request_id=request.request_id,
                         new_token_ids=[],
                         finish_reason=request.get_finished_reason(),
                         events=request.take_events(),
                         trace_headers=request.trace_headers,
+                        num_cached_tokens=_get_request_num_cached_tokens(request),
                     )
                 )
                 if self.chunk_transfer_adapter is not None:
