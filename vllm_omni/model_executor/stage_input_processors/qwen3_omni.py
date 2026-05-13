@@ -487,6 +487,14 @@ def thinker2talker(
 # =========================
 
 
+def _eof_payload(transfer_manager: Any) -> OmniPayloadStruct:
+    """Return an EOF marker payload when the request is finished with no codes."""
+    return {
+        "codes": {"audio": []},
+        "meta": {"left_context_size": 0, "finished": torch.tensor(True)},
+    }
+
+
 def talker2code2wav_async_chunk(
     transfer_manager: Any,
     pooling_output: OmniPayload,
@@ -497,12 +505,18 @@ def talker2code2wav_async_chunk(
     Pooling version.
     """
     if not isinstance(pooling_output, dict):
+        if is_finished:
+            return _eof_payload(transfer_manager)
         return None
     talker_codes = pooling_output.get("codes", {})
     if not isinstance(talker_codes, dict):
+        if is_finished:
+            return _eof_payload(transfer_manager)
         return None
     code_predictor_codes = talker_codes.get("audio")
     if code_predictor_codes is None:
+        if is_finished:
+            return _eof_payload(transfer_manager)
         return None
 
     connector = getattr(transfer_manager, "connector", None)
@@ -512,24 +526,36 @@ def talker2code2wav_async_chunk(
     left_context_size_config = int(cfg.get("codec_left_context_frames", 25))
 
     if code_predictor_codes is None:
+        if is_finished:
+            return _eof_payload(transfer_manager)
         return None
     if isinstance(code_predictor_codes, torch.Tensor):
         if code_predictor_codes.numel() == 0:
+            if is_finished:
+                return _eof_payload(transfer_manager)
             return None
     elif hasattr(code_predictor_codes, "__len__"):
         if len(code_predictor_codes) == 0:
+            if is_finished:
+                return _eof_payload(transfer_manager)
             return None
 
     if isinstance(code_predictor_codes, torch.Tensor):
         if not code_predictor_codes.any():
+            if is_finished:
+                return _eof_payload(transfer_manager)
             return None
     else:
         code_tensor = torch.tensor(code_predictor_codes, dtype=torch.long)
         if not code_tensor.any():
+            if is_finished:
+                return _eof_payload(transfer_manager)
             return None
 
     codec_codes = code_predictor_codes.to(torch.long).transpose(0, 1).cpu().to(torch.long).reshape(-1).tolist()
     if sum(codec_codes) == 0:
+        if is_finished:
+            return _eof_payload(transfer_manager)
         return None
 
     request_id = request.external_req_id
