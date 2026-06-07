@@ -25,6 +25,7 @@ import contextlib
 import tempfile
 import threading
 from collections.abc import Iterable
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -156,6 +157,62 @@ def _pick(info: dict, key: str, default):
     return val if val is not None else default
 
 
+@contextmanager
+def _transformers_keys_to_ignore_compat():
+    """Make ``trust_remote_code`` weight loading robust to the transformers 5.9
+    ``_keys_to_ignore_on_load_unexpected`` list-vs-set change.
+
+    transformers 5.9 rewrote ``PreTrainedModel._adjust_missing_and_unexpected_keys``
+    from ``(attr or []) + patterns`` (list concatenation) to
+    ``(attr or set()) | patterns`` (set union). Remote-code models such as
+    ``OpenMOSS-Team/MOSS-TTS-Nano`` still declare
+    ``_keys_to_ignore_on_load_unexpected`` as a *list*, so ``list | set`` raises
+    ``TypeError: unsupported operand type(s) for |: 'list' and 'set'`` and the
+    engine core dies during model load.
+
+    ``requirements/common.txt`` pins transformers away from the broken release,
+    but the rebase agent's Phase 1 dependency-sync re-aligns that constraint with
+    upstream vLLM (which does not exclude it). This in-code guard keeps
+    MOSS-TTS-Nano loadable regardless of which transformers ends up installed,
+    while preserving the model's ignore patterns.
+    """
+    try:
+        from transformers.modeling_utils import PreTrainedModel
+    except Exception:  # pragma: no cover - transformers is always present here
+        yield
+        return
+
+    orig = getattr(PreTrainedModel, "_adjust_missing_and_unexpected_keys", None)
+    if orig is None:
+        yield
+        return
+
+    def _wrapper(self, *args, **kwargs):
+        try:
+            return orig(self, *args, **kwargs)
+        except TypeError as exc:
+            if "unsupported operand type" not in str(exc):
+                raise
+            attr = getattr(self, "_keys_to_ignore_on_load_unexpected", None)
+            if not isinstance(attr, (list, tuple)):
+                raise
+            # transformers >=5.9 combines patterns with ``set | ...``. The
+            # ignore-pattern combine runs before any mutation of ``loading_info``
+            # (see PreTrainedModel._adjust_missing_and_unexpected_keys), so it is
+            # safe to coerce the list to a set and re-run the original once.
+            self._keys_to_ignore_on_load_unexpected = set(attr)
+            try:
+                return orig(self, *args, **kwargs)
+            finally:
+                self._keys_to_ignore_on_load_unexpected = attr
+
+    PreTrainedModel._adjust_missing_and_unexpected_keys = _wrapper
+    try:
+        yield
+    finally:
+        PreTrainedModel._adjust_missing_and_unexpected_keys = orig
+
+
 class MossTTSNanoForGeneration(nn.Module):
     """Single-stage MOSS-TTS-Nano model with streaming audio output.
 
@@ -193,7 +250,10 @@ class MossTTSNanoForGeneration(nn.Module):
         logger.info("Loading MOSS-TTS-Nano LM from %s (dtype=%s)", self.model_path, tts_dtype)
         from transformers import AutoModelForCausalLM
 
-        with _hf_load_without_tp_warmup():
+        # Two orthogonal trust_remote_code transformers fixes:
+        #  - _hf_load_without_tp_warmup: tp_plan=None warmup crash (transformers 5.8.x)
+        #  - _transformers_keys_to_ignore_compat: keys list-vs-set (transformers 5.9)
+        with _hf_load_without_tp_warmup(), _transformers_keys_to_ignore_compat():
             lm = AutoModelForCausalLM.from_pretrained(
                 self.model_path,
                 trust_remote_code=True,
@@ -233,7 +293,10 @@ class MossTTSNanoForGeneration(nn.Module):
         logger.info("Loading MOSS-Audio-Tokenizer-Nano from %s", codec_path)
         from transformers import AutoModel
 
-        with _hf_load_without_tp_warmup():
+        # Two orthogonal trust_remote_code transformers fixes:
+        #  - _hf_load_without_tp_warmup: tp_plan=None warmup crash (transformers 5.8.x)
+        #  - _transformers_keys_to_ignore_compat: keys list-vs-set (transformers 5.9)
+        with _hf_load_without_tp_warmup(), _transformers_keys_to_ignore_compat():
             audio_tokenizer = AutoModel.from_pretrained(
                 codec_path,
                 trust_remote_code=True,
