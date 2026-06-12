@@ -63,6 +63,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
+    SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
@@ -732,17 +733,20 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
 
         use_audio_in_video = False
         if "video" in mm_kwargs:
-            non_none_items = [item for item in mm_kwargs["video"] if item is not None]
-            if non_none_items:
-                # Normal case: at least one non-cached item, read flag directly
-                use_audio_in_video = any(item["use_audio_in_video"].data for item in non_none_items)
-            elif "audio" in mm_prompt_updates:
-                # All video items are from cache (None); infer from prompt:
-                # use_audio_in_video=True means the prompt has no <|audio_pad|>
-                # placeholder (audio is embedded in video tokens instead)
-                tokenizer = self.info.get_tokenizer()
-                audio_pad_id = tokenizer.convert_tokens_to_ids("<|audio_pad|>")
-                use_audio_in_video = audio_pad_id not in prompt_ids
+            for item in mm_kwargs["video"]:
+                if item and item["use_audio_in_video"].data:
+                    use_audio_in_video = True
+                else:
+                    use_audio_in_video = False
+            # for mutilmodality cache
+            if any(item is None for item in mm_kwargs["video"]):
+                video_token_id = self.info.get_hf_config().video_token_id
+                audio_token_id = self.info.get_hf_config().audio_token_id
+                video_audio_item_num = sum(id in (video_token_id, audio_token_id) for id in prompt_ids)
+                audio_updates_num = len(mm_prompt_updates.get("audio", []))
+                video_updates_num = len(mm_prompt_updates.get("video", []))
+                if video_audio_item_num != video_updates_num + audio_updates_num:
+                    use_audio_in_video = True
 
         # normal case with `use_audio_in_video=False`
         if is_update_applied:
@@ -1053,6 +1057,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
     SupportsPP,
+    SupportsLoRA,
     SupportsMRoPE,
     Qwen3OmniMoeConditionalGenerationMixin,
     SupportsTranscription,
@@ -1070,6 +1075,11 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             "q_proj",
             "k_proj",
             "v_proj",
+        ],
+        "attn.qkv": [
+            "attn.q",
+            "attn.k",
+            "attn.v",
         ],
         "gate_up_proj": [
             "gate_proj",
@@ -1093,7 +1103,8 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.vllm_config = vllm_config  # needed for torch compile forward context
-        thinker_config: Qwen3OmniMoeThinkerConfig = vllm_config.model_config.hf_config
+        hf_config = vllm_config.model_config.hf_config
+        thinker_config: Qwen3OmniMoeThinkerConfig = getattr(hf_config, "thinker_config", None) or hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = thinker_config
@@ -1187,11 +1198,8 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     ) -> IntermediateTensors | None:
         if not getattr(self, "deepstack_input_embeds", None):
             return None  # If vision tower is skipped
-        if getattr(self, "deepstack_input_embeds_num_tokens", 0) == 0:
-            return None
-        buf = self.deepstack_input_embeds[0].size(0)
-        if num_tokens > buf:
-            raise ValueError(f"Requested more deepstack tokens than buffer capacity: {num_tokens=} > {buf=}")
+        if num_tokens > self.deepstack_input_embeds[0].size(0):
+            self._resize_deepstack_input_embeds(num_tokens)
         n_valid = self.deepstack_input_embeds_num_tokens
         # embed_input_ids runs on unpadded length; forward uses padded num_tokens
         # (vLLM gpu_model_runner). Tail positions have no vision deepstack and must
@@ -1208,6 +1216,17 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             }
         )
 
+    def _resize_deepstack_input_embeds(self, num_tokens: int) -> None:
+        self.deepstack_input_embeds = [
+            torch.zeros(
+                num_tokens,
+                self.config.text_config.hidden_size,
+                device=self.deepstack_input_embeds[0].device,
+                dtype=self.deepstack_input_embeds[0].dtype,
+            )
+            for _ in range(self.deepstack_num_level)
+        ]
+
     def _set_deepstack_input_embeds(self, deepstack_input_embeds: torch.Tensor) -> None:
         if not getattr(self, "deepstack_input_embeds", None):
             return
@@ -1215,15 +1234,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         # set deepstack_input_embeds to buffer
         num_tokens = deepstack_input_embeds.size(1)
         if num_tokens > self.deepstack_input_embeds[0].size(0):
-            self.deepstack_input_embeds = [
-                torch.zeros(
-                    num_tokens,
-                    self.config.text_config.hidden_size,
-                    device=self.deepstack_input_embeds[0].device,
-                    dtype=self.deepstack_input_embeds[0].dtype,
-                )
-                for _ in range(self.deepstack_num_level)
-            ]
+            self._resize_deepstack_input_embeds(num_tokens)
         for idx in range(self.deepstack_num_level):
             self.deepstack_input_embeds[idx][:num_tokens].copy_(deepstack_input_embeds[idx])
         self.deepstack_input_embeds_num_tokens = num_tokens
@@ -1643,6 +1654,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         self,
         input_tokens: list[int],
         mm_features: list[MultiModalFeatureSpec],
+        **kwargs,
     ) -> tuple[torch.Tensor, int]:
         """Compute M-RoPE input positions using mm_features directly."""
         seq_len = len(input_tokens)
