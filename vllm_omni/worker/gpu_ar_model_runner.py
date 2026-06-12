@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import gc
+from collections.abc import Mapping
 from contextlib import nullcontext
 from copy import copy
 from dataclasses import replace
