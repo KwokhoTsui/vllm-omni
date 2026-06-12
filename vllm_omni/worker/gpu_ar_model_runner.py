@@ -6,7 +6,6 @@ and also outputs sampled tokens.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 import gc
 from collections.abc import Mapping
 from contextlib import nullcontext
