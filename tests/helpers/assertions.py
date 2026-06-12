@@ -569,8 +569,7 @@ def assert_audio_speech_response(response: Any, request_config: dict[str, Any], 
             print(f"input text is: {expected_text}")
             similarity = cosine_similarity_text(transcript.lower(), expected_text.lower())
             print(f"Cosine similarity: {similarity:.3f}")
-            min_similarity = float(request_config.get("min_similarity", 0.9))
-            assert similarity > min_similarity, (
+            assert similarity > 0.9, (
                 f"Transcript doesn't match input: similarity={similarity:.2f}, transcript='{transcript}'"
             )
         _assert_preset_voice_gender_from_audio(response.audio_bytes, request_config.get("voice"))

@@ -21,7 +21,7 @@ def test_bench_serve_cli_mocks_http_request(tmp_path: Path):
     sitecustomize_path = tmp_path / "sitecustomize.py"
     sitecustomize_path.write_text(
         textwrap.dedent(
-            """\
+            """
             import atexit
             import json
             import os

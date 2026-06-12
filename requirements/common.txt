@@ -1,14 +1,14 @@
 # Common dependencies for all platforms
-# transformers: keep aligned with upstream vLLM constraint, plus an extra
-# exclusion for the 5.9 series.
+# transformers: kept exactly aligned with the upstream vLLM constraint.
 # vLLM pins ">= 4.56.0, != 5.0.*, != 5.1.*, != 5.2.*, != 5.3.*, != 5.4.*, != 5.5.0".
-# 5.9.* breaks models that define _keys_to_ignore_on_load_unexpected as a list
-# (e.g. OpenMOSS-Team/MOSS-TTS-Nano) because it changed
-# _adjust_missing_and_unexpected_keys from list+list to set|set, which raises
-# "TypeError: unsupported operand type(s) for |: 'list' and 'set'" at load time.
-# NOTE: the rebase agent's Phase 1 dependency-sync re-aligns this whole line with
-# upstream vLLM, so MossTTSNanoForGeneration also carries an in-code guard
-# (_transformers_keys_to_ignore_compat) that survives the overwrite.
+# The previous extra "< 5.9.0" exclusion was removed when re-aligning with
+# upstream: transformers 5.9 changed _adjust_missing_and_unexpected_keys from
+# list+list to set|set, breaking models that declare
+# _keys_to_ignore_on_load_unexpected as a list (e.g. OpenMOSS-Team/MOSS-TTS-Nano)
+# with "TypeError: unsupported operand type(s) for |: 'list' and 'set'".
+# That breakage is now handled in code instead of by pinning:
+# MossTTSNanoForGeneration wraps weight loading in
+# _transformers_keys_to_ignore_compat (modeling_moss_tts_nano.py).
 transformers >= 4.56.0, != 5.0.*, != 5.1.*, != 5.2.*, != 5.3.*, != 5.4.*, != 5.5.0
 av>=14.0.0
 omegaconf>=2.3.0

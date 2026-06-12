@@ -584,6 +584,11 @@ def test_rmsnorm_fused_native_parity_custom_weight():
     (vllm._custom_ops.rms_norm) computes in bf16 precision internally,
     while forward_native uses float32 intermediates. With random custom
     weights (not the default ones-weight), this precision gap exceeds 1e-3.
+
+    The gap surfaced after upstream vLLM routed RMSNorm through the vLLM IR
+    op (ir.ops.rms_norm) — see upstream commit 40bb17502
+    "[vLLM IR] 1/N Implement IR skeleton and rms_norm op (#33825)" — which
+    changed which fused kernel/precision path the layer dispatches to.
     """
     from vllm_omni.diffusion.layers.norm import RMSNorm
 
