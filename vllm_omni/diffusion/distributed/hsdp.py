@@ -144,10 +144,7 @@ def apply_hsdp_to_model(
     # keep the original storage dtype on all-gather instead of casting to
     # hsdp_config.param_dtype (typically bfloat16). FP8 GEMM kernels expect
     # FP8 inputs; an implicit FP8 -> bf16 cast would silently break them.
-    has_fp8_params = any(
-        p.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
-        for p in model.parameters()
-    )
+    has_fp8_params = any(p.dtype in (torch.float8_e4m3fn, torch.float8_e5m2) for p in model.parameters())
     mp_policy = MixedPrecisionPolicy(
         param_dtype=None if has_fp8_params else hsdp_config.param_dtype,
         reduce_dtype=hsdp_config.reduce_dtype,

@@ -663,6 +663,7 @@ class DiffusersPipelineLoader:
             from vllm_omni.diffusion.quantization.hsdp_fp8 import (
                 prepare_fp8_layers_for_fsdp,
             )
+
             for _attr in ("transformer", "transformer_2"):
                 _trans = getattr(model, _attr, None)
                 if _trans is not None:

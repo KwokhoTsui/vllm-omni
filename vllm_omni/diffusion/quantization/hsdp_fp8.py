@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import types
 
-import torch
 from torch import nn
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.fp8 import Fp8OnlineLinearMethod
@@ -99,9 +98,7 @@ def prepare_fp8_layers_for_fsdp(model: nn.Module) -> int:
         # patches on the same object (which would compose into identity).
         if id(kernel) not in patched_kernel_ids:
             original_get = kernel._get_layer_params
-            kernel._get_layer_params = types.MethodType(
-                _build_transposed_get_layer_params(original_get), kernel
-            )
+            kernel._get_layer_params = types.MethodType(_build_transposed_get_layer_params(original_get), kernel)
             patched_kernel_ids.add(id(kernel))
 
         n_patched += 1
